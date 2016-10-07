@@ -1290,6 +1290,7 @@ public class IndexMaintainer implements Writable, Iterable<ColumnReference> {
             byte[] dataTableCq = Bytes.readByteArray(input);
             coveredColumnsInfo.add(new Pair<>(Bytes.toString(dataTableCf), Bytes.toString(dataTableCq)));
         }
+        storeColsInSingleCell = WritableUtils.readVInt(input) > 0;
         initCachedState();
     }
     
@@ -1353,6 +1354,7 @@ public class IndexMaintainer implements Writable, Iterable<ColumnReference> {
             Bytes.writeByteArray(output, colInfo.getFirst() == null ? null : colInfo.getFirst().getBytes());
             Bytes.writeByteArray(output, colInfo.getSecond().getBytes());
         }
+        WritableUtils.writeVInt(output, storeColsInSingleCell ? 1 : -1);
     }
 
     public int getEstimatedByteSize() {

@@ -244,7 +244,6 @@ public class AlterTableIT extends ParallelStatsDisabledIT {
 
     
     @Test
-    @Ignore //FIXME: See PHOENIX-3340 
     public void testDropIndexedColumnImmutableIndex() throws Exception {
         helpTestDropIndexedColumn(true);
     }
