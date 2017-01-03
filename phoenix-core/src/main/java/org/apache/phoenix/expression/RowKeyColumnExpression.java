@@ -139,7 +139,15 @@ public class RowKeyColumnExpression  extends ColumnExpression {
     @Override
     public void readFields(DataInput input) throws IOException {
         super.readFields(input);
-        accessor = new RowKeyValueAccessor();
+        
+        // 2017-01-02 modified by mini666
+//        accessor = new RowKeyValueAccessor();
+        String className = input.readUTF();
+        try {
+					accessor = Class.forName(className).asSubclass(RowKeyValueAccessor.class).newInstance();
+				} catch (Exception e) {
+					throw new IOException(e);
+				}
         accessor.readFields(input);
         fromType = type; // fromType only needed on client side
     }
@@ -147,6 +155,9 @@ public class RowKeyColumnExpression  extends ColumnExpression {
     @Override
     public void write(DataOutput output) throws IOException {
         super.write(output);
+        
+    		// 2017-01-02 added by mini666 - 서버에서 읽을때 어떤 Accessor를 생성할지 구별하기 위해.
+        output.writeUTF(accessor.getClass().getName());
         accessor.write(output);
     }
     

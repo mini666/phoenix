@@ -279,6 +279,9 @@ public class ConnectionQueryServicesImpl extends DelegateQueryServices implement
     private static final byte[] UPGRADE_MUTEX_LOCKED = "UPGRADE_MUTEX_LOCKED".getBytes();
     private static final byte[] UPGRADE_MUTEX_UNLOCKED = "UPGRADE_MUTEX_UNLOCKED".getBytes();
 
+    // 2016-12-29 added by mini666
+    private static final String ALREADY_EXIST_TABLE = "ALREADY_EXIST";
+    
     private static interface FeatureSupported {
         boolean isSupported(ConnectionQueryServices services);
     }
@@ -1041,79 +1044,90 @@ public class ConnectionQueryServicesImpl extends DelegateQueryServices implement
             HTableDescriptor newDesc = generateTableDescriptor(tableName, existingDesc, tableType, props, families,
                     splits, isNamespaceMapped);
 
-            if (!tableExist) {
-                if (newDesc.getValue(MetaDataUtil.IS_LOCAL_INDEX_TABLE_PROP_BYTES) != null && Boolean.TRUE.equals(
-                        PBoolean.INSTANCE.toObject(newDesc.getValue(MetaDataUtil.IS_LOCAL_INDEX_TABLE_PROP_BYTES)))) {
-                    newDesc.setValue(HTableDescriptor.SPLIT_POLICY, IndexRegionSplitPolicy.class.getName());
-                }
-                // Remove the splitPolicy attribute to prevent HBASE-12570
-                if (isMetaTable) {
-                    newDesc.remove(HTableDescriptor.SPLIT_POLICY);
-                }
-                try {
-                    if (splits == null) {
-                        admin.createTable(newDesc);
-                    } else {
-                        admin.createTable(newDesc, splits);
-                    }
-                } catch (TableExistsException e) {
-                    // We can ignore this, as it just means that another client beat us
-                    // to creating the HBase metadata.
-                    return null;
-                }
-                if (isMetaTable) {
-                    checkClientServerCompatibility(SchemaUtil.getPhysicalName(SYSTEM_CATALOG_NAME_BYTES, this.getProps()).getName());
-                    /*
-                     * Now we modify the table to add the split policy, since we know that the client and
-                     * server and compatible. This works around HBASE-12570 which causes the cluster to be
-                     * brought down.
-                     */
-                    newDesc.setValue(HTableDescriptor.SPLIT_POLICY, MetaDataSplitPolicy.class.getName());
-                    modifyTable(physicalTable, newDesc, true);
-                }
-                return null;
-            } else {
-                if (isMetaTable) {
-                    checkClientServerCompatibility(SchemaUtil.getPhysicalName(SYSTEM_CATALOG_NAME_BYTES, this.getProps()).getName());
-                } else {
-                    for(Pair<byte[],Map<String,Object>> family: families) {
-                        if ((newDesc.getValue(HTableDescriptor.SPLIT_POLICY)==null || !newDesc.getValue(HTableDescriptor.SPLIT_POLICY).equals(
-                                IndexRegionSplitPolicy.class.getName()))
-                                && Bytes.toString(family.getFirst()).startsWith(
-                                        QueryConstants.LOCAL_INDEX_COLUMN_FAMILY_PREFIX)) {
-                            newDesc.setValue(HTableDescriptor.SPLIT_POLICY, IndexRegionSplitPolicy.class.getName());
-                            break;
-                        }
-                    }
-                }
-
-
-                if (!modifyExistingMetaData) {
-                    return existingDesc; // Caller already knows that no metadata was changed
-                }
-                boolean willBeTx = Boolean.TRUE.equals(props.get(TableProperty.TRANSACTIONAL.name()));
-                // If mapping an existing table as transactional, set property so that existing
-                // data is correctly read.
-                if (willBeTx) {
-                    newDesc.setValue(TxConstants.READ_NON_TX_DATA, Boolean.TRUE.toString());
-                } else {
-                    // If we think we're creating a non transactional table when it's already
-                    // transactional, don't allow.
-                    if (existingDesc.hasCoprocessor(PhoenixTransactionalProcessor.class.getName())) {
-                        throw new SQLExceptionInfo.Builder(SQLExceptionCode.TX_MAY_NOT_SWITCH_TO_NON_TX)
-                        .setSchemaName(SchemaUtil.getSchemaNameFromFullName(tableName))
-                        .setTableName(SchemaUtil.getTableNameFromFullName(tableName)).build().buildException();
-                    }
-                    newDesc.remove(TxConstants.READ_NON_TX_DATA);
-                }
-                if (existingDesc.equals(newDesc)) {
-                    return null; // Indicate that no metadata was changed
-                }
-
-                modifyTable(physicalTable, newDesc, true);
-                return newDesc;
-            }
-
+            // 2016-12-29 modified by mini666 - do not create table in case of already exist table.
+        		// 기존 테이블에 Coprocessor를 붙이고 테이블 삭제시 삭제되지 않게 하기 위한 플래그를 설정한다.
+        		Object value = props.get(ALREADY_EXIST_TABLE);
+        		if (tableExist && value != null && (Boolean)value) {
+        			if (logger.isDebugEnabled()) {
+        				logger.debug("{} table is already exist table.", newDesc.getTableName().getNameAsString());
+        			}
+        			
+        			// Coprocessor는 generateTableDescriptor에서 추가되었다. 테이블 삭제시 Coprocessor를 삭제해야 한다.
+        			admin.modifyTable(tableName, newDesc);
+        		} else {
+		            if (!tableExist) {
+		                if (newDesc.getValue(MetaDataUtil.IS_LOCAL_INDEX_TABLE_PROP_BYTES) != null && Boolean.TRUE.equals(
+		                        PBoolean.INSTANCE.toObject(newDesc.getValue(MetaDataUtil.IS_LOCAL_INDEX_TABLE_PROP_BYTES)))) {
+		                    newDesc.setValue(HTableDescriptor.SPLIT_POLICY, IndexRegionSplitPolicy.class.getName());
+		                }
+		                // Remove the splitPolicy attribute to prevent HBASE-12570
+		                if (isMetaTable) {
+		                    newDesc.remove(HTableDescriptor.SPLIT_POLICY);
+		                }
+		                try {
+		                    if (splits == null) {
+		                        admin.createTable(newDesc);
+		                    } else {
+		                        admin.createTable(newDesc, splits);
+		                    }
+		                } catch (TableExistsException e) {
+		                    // We can ignore this, as it just means that another client beat us
+		                    // to creating the HBase metadata.
+		                    return null;
+		                }
+		                if (isMetaTable) {
+		                    checkClientServerCompatibility(SchemaUtil.getPhysicalName(SYSTEM_CATALOG_NAME_BYTES, this.getProps()).getName());
+		                    /*
+		                     * Now we modify the table to add the split policy, since we know that the client and
+		                     * server and compatible. This works around HBASE-12570 which causes the cluster to be
+		                     * brought down.
+		                     */
+		                    newDesc.setValue(HTableDescriptor.SPLIT_POLICY, MetaDataSplitPolicy.class.getName());
+		                    modifyTable(physicalTable, newDesc, true);
+		                }
+		                return null;
+		            } else {
+		                if (isMetaTable) {
+		                    checkClientServerCompatibility(SchemaUtil.getPhysicalName(SYSTEM_CATALOG_NAME_BYTES, this.getProps()).getName());
+		                } else {
+		                    for(Pair<byte[],Map<String,Object>> family: families) {
+		                        if ((newDesc.getValue(HTableDescriptor.SPLIT_POLICY)==null || !newDesc.getValue(HTableDescriptor.SPLIT_POLICY).equals(
+		                                IndexRegionSplitPolicy.class.getName()))
+		                                && Bytes.toString(family.getFirst()).startsWith(
+		                                        QueryConstants.LOCAL_INDEX_COLUMN_FAMILY_PREFIX)) {
+		                            newDesc.setValue(HTableDescriptor.SPLIT_POLICY, IndexRegionSplitPolicy.class.getName());
+		                            break;
+		                        }
+		                    }
+		                }
+		
+		
+		                if (!modifyExistingMetaData) {
+		                    return existingDesc; // Caller already knows that no metadata was changed
+		                }
+		                boolean willBeTx = Boolean.TRUE.equals(props.get(TableProperty.TRANSACTIONAL.name()));
+		                // If mapping an existing table as transactional, set property so that existing
+		                // data is correctly read.
+		                if (willBeTx) {
+		                    newDesc.setValue(TxConstants.READ_NON_TX_DATA, Boolean.TRUE.toString());
+		                } else {
+		                    // If we think we're creating a non transactional table when it's already
+		                    // transactional, don't allow.
+		                    if (existingDesc.hasCoprocessor(PhoenixTransactionalProcessor.class.getName())) {
+		                        throw new SQLExceptionInfo.Builder(SQLExceptionCode.TX_MAY_NOT_SWITCH_TO_NON_TX)
+		                        .setSchemaName(SchemaUtil.getSchemaNameFromFullName(tableName))
+		                        .setTableName(SchemaUtil.getTableNameFromFullName(tableName)).build().buildException();
+		                    }
+		                    newDesc.remove(TxConstants.READ_NON_TX_DATA);
+		                }
+		                if (existingDesc.equals(newDesc)) {
+		                    return null; // Indicate that no metadata was changed
+		                }
+		
+		                modifyTable(physicalTable, newDesc, true);
+		                return newDesc;
+		            }
+        		}
         } catch (IOException e) {
             sqlE = ServerUtil.parseServerException(e);
         } catch (InterruptedException e) {
@@ -1611,6 +1625,15 @@ public class ConnectionQueryServicesImpl extends DelegateQueryServices implement
         dropTables(Collections.<byte[]>singletonList(tableNameToDelete));
     }
     
+    // 2016-12-29 added by mini666
+    private void removeCoprocessorsOfPhoenix(HTableDescriptor tableDesc) {
+    	for (String className : tableDesc.getCoprocessors()) {
+    		if (className.startsWith("org.apache.phoenix")) {
+    			tableDesc.removeCoprocessor(className);
+    		}
+    	}
+    }
+    
     private void dropTables(final List<byte[]> tableNamesToDelete) throws SQLException {
         SQLException sqlE = null;
         try (HBaseAdmin admin = getAdmin()) {
@@ -1618,8 +1641,18 @@ public class ConnectionQueryServicesImpl extends DelegateQueryServices implement
                 for ( byte[] tableName : tableNamesToDelete ) {
                     try {
                         HTableDescriptor htableDesc = this.getTableDescriptor(tableName);
-                        admin.disableTable(tableName);
-                        admin.deleteTable(tableName);
+                        
+                        // 2016-12-29 modified by mini666
+                        if (htableDesc.getValue(ALREADY_EXIST_TABLE) != null) {
+                        	// 기존 테이블 플래그를 빼고 Phoenix에서 추가한 Coprocessor만 삭제처리한다.
+                        	htableDesc.remove(ALREADY_EXIST_TABLE);
+                        	removeCoprocessorsOfPhoenix(htableDesc);
+                        	
+                        	admin.modifyTable(tableName, htableDesc);
+                        } else {
+		                        admin.disableTable(tableName);
+		                        admin.deleteTable(tableName);
+                        }
                         tableStatsCache.invalidateAll(htableDesc);
                         clearTableRegionCache(tableName);
                     } catch (TableNotFoundException ignore) {

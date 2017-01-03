@@ -221,7 +221,7 @@ public class TenantIdByteConversionTest {
     }
 
     public static RowKeySchema getDataSchema (final PDataType data, final SortOrder sortOrder) {
-        RowKeySchemaBuilder builder = new RowKeySchemaBuilder(3);
+        RowKeySchemaBuilder builder = new RowKeySchemaBuilder(null, 3);		// 2017-01-03 modified by mini666 - RowKeySchema 변경에 따른 수정.
 
         builder.addField(new PDatum() {
             @Override public boolean isNullable() {

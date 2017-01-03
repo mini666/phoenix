@@ -466,7 +466,7 @@ public class PTableImpl implements PTable {
         this.allColumns = ImmutableList.copyOf(allColumns);
         estimatedSize += SizedUtil.sizeOfMap(numPKColumns) + SizedUtil.sizeOfMap(allColumns.length);
 
-        RowKeySchemaBuilder builder = new RowKeySchemaBuilder(numPKColumns);
+        RowKeySchemaBuilder builder = new RowKeySchemaBuilder(this, numPKColumns);		// 2017-01-03 modified by mini666 - RowKeySchema 변경에 따른 수정.
         // Two pass so that column order in column families matches overall column order
         // and to ensure that column family order is constant
         int maxExpectedSize = allColumns.length - numPKColumns;

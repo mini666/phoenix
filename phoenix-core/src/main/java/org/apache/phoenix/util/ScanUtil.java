@@ -69,6 +69,7 @@ import org.apache.phoenix.schema.PTable.IndexType;
 import org.apache.phoenix.schema.RowKeySchema;
 import org.apache.phoenix.schema.SortOrder;
 import org.apache.phoenix.schema.ValueSchema.Field;
+import org.apache.phoenix.schema.rowkey.RowKeyUtil;
 import org.apache.phoenix.schema.types.PDataType;
 import org.apache.phoenix.schema.types.PVarbinary;
 
@@ -291,6 +292,55 @@ public class ScanUtil {
 		}
 	}
 
+	// 2016-12-30 added by mini666
+	/////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+	public static byte[] getMinKey(PTable table, RowKeySchema schema, List<List<KeyRange>> slots, int[] slotSpan) {
+		return getKey(table, schema, slots, slotSpan, Bound.LOWER);
+	}
+
+	public static byte[] getMaxKey(PTable table, RowKeySchema schema, List<List<KeyRange>> slots, int[] slotSpan) {
+		return getKey(table, schema, slots, slotSpan, Bound.UPPER);
+	}
+
+	private static byte[] getKey(PTable table, RowKeySchema schema, List<List<KeyRange>> slots, int[] slotSpan, Bound bound) {
+		if (slots.isEmpty()) {
+			return KeyRange.UNBOUND;
+		}
+		int[] position = new int[slots.size()];
+		int maxLength = 0;
+		for (int i = 0; i < position.length; i++) {
+			position[i] = bound == Bound.LOWER ? 0 : slots.get(i).size() - 1;
+			KeyRange range = slots.get(i).get(position[i]);
+			Field field = schema.getField(i + slotSpan[i]);
+			int keyLength = range.getRange(bound).length;
+			if (!field.getDataType().isFixedWidth()) {
+				keyLength++;
+				if (range.isUnbound(bound) && !range.isInclusive(bound) && field.getSortOrder() == SortOrder.DESC) {
+					keyLength++;
+				}
+			}
+			maxLength += keyLength;
+		}
+		
+		// 로우키 구분자 적용.
+		if (RowKeyUtil.isExtraOrdinaryTable(table)) {
+			maxLength += slots.size() - 1;
+		}
+		
+		byte[] key = new byte[maxLength];
+		int length = setKey(table, schema, slots, slotSpan, position, bound, key, 0, 0, position.length);
+		if (length == 0) {
+			return KeyRange.UNBOUND;
+		}
+		if (length == maxLength) {
+			return key;
+		}
+		byte[] keyCopy = new byte[length];
+		System.arraycopy(key, 0, keyCopy, 0, length);
+		return keyCopy;
+	}
+	/////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+	
     public static byte[] getMinKey(RowKeySchema schema, List<List<KeyRange>> slots, int[] slotSpan) {
         return getKey(schema, slots, slotSpan, Bound.LOWER);
     }
@@ -331,6 +381,140 @@ public class ScanUtil {
         return keyCopy;
     }
 
+  // 2016-12-30 added by mini666
+  /////////////////////////////////////////////////////////////////
+	public static int setKey(PTable table, RowKeySchema schema, List<List<KeyRange>> slots, int[] slotSpan, int[] position, Bound bound, byte[] key, int byteOffset, int slotStartIndex, int slotEndIndex) {
+		return setKey(table, schema, slots, slotSpan, position, bound, key, byteOffset, slotStartIndex, slotEndIndex, slotStartIndex);
+	}
+
+	public static int setKey(PTable table, RowKeySchema schema, List<List<KeyRange>> slots, int[] slotSpan, int[] position, Bound bound, byte[] key, int byteOffset, int slotStartIndex, int slotEndIndex, int schemaStartIndex) {
+		int offset = byteOffset;
+		boolean lastInclusiveUpperSingleKey = false;
+		boolean anyInclusiveUpperRangeKey = false;
+		boolean lastUnboundUpper = false;
+		// The index used for slots should be incremented by 1,
+		// but the index for the field it represents in the schema
+		// should be incremented by 1 + value in the current slotSpan index
+		// slotSpan stores the number of columns beyond one that the range spans
+		Field field = null;
+		int i = slotStartIndex, fieldIndex = ScanUtil.getRowKeyPosition(slotSpan, slotStartIndex);
+		for (i = slotStartIndex; i < slotEndIndex; i++) {
+			// Build up the key by appending the bound of each key range
+			// from the current position of each slot.
+			KeyRange range = slots.get(i).get(position[i]);
+			// Use last slot in a multi-span column to determine if fixed width
+			field = schema.getField(fieldIndex + slotSpan[i]);
+			boolean isFixedWidth = field.getDataType().isFixedWidth();
+			/*
+			 * If the current slot is unbound then stop if: 1) setting the upper bound. There's no value in continuing because nothing will be filtered. 2) setting the lower bound when the type is fixed
+			 * length for the same reason. However, if the type is variable width continue building the key because null values will be filtered since our separator byte will be appended and incremented. 3)
+			 * if the range includes everything as we cannot add any more useful information to the key after that.
+			 */
+			lastUnboundUpper = false;
+			if (range.isUnbound(bound) && (bound == Bound.UPPER || isFixedWidth || range == KeyRange.EVERYTHING_RANGE)) {
+				lastUnboundUpper = (bound == Bound.UPPER);
+				break;
+			}
+			byte[] bytes = range.getRange(bound);
+			// 2017-01-02 modified by mini666
+			if (slotStartIndex == 1 && RowKeyUtil.hasDelimiter(table) && (i + 1) != slots.size()) {
+				key[offset++] = RowKeyUtil.getSeparator(table);
+				System.arraycopy(bytes, 0, key, offset, bytes.length);
+				offset += bytes.length;
+			} else {
+				System.arraycopy(bytes, 0, key, offset, bytes.length);
+				offset += bytes.length;
+			}
+
+			/*
+			 * We must add a terminator to a variable length key even for the last PK column if the lower key is non inclusive or the upper key is inclusive. Otherwise, we'd be incrementing the key value
+			 * itself, and thus bumping it up too much.
+			 */
+			boolean inclusiveUpper = range.isUpperInclusive() && bound == Bound.UPPER;
+			boolean exclusiveLower = !range.isLowerInclusive() && bound == Bound.LOWER && range != KeyRange.EVERYTHING_RANGE;
+			boolean exclusiveUpper = !range.isUpperInclusive() && bound == Bound.UPPER;
+			// If we are setting the upper bound of using inclusive single key, we remember
+			// to increment the key if we exit the loop after this iteration.
+			//
+			// We remember to increment the last slot if we are setting the upper bound with an
+			// inclusive range key.
+			//
+			// We cannot combine the two flags together in case for single-inclusive key followed
+			// by the range-exclusive key. In that case, we do not need to increment the end at the
+			// end. But if we combine the two flag, the single inclusive key in the middle of the
+			// key slots would cause the flag to become true.
+			lastInclusiveUpperSingleKey = range.isSingleKey() && inclusiveUpper;
+			anyInclusiveUpperRangeKey |= !range.isSingleKey() && inclusiveUpper;
+			// A null or empty byte array is always represented as a zero byte
+			byte sepByte = SchemaUtil.getSeparatorByte(table, schema.rowKeyOrderOptimizable(), bytes.length == 0, field);		// 2016-12-30 modified by mini666 adding parameter 'table'
+
+			if (!isFixedWidth && (sepByte == QueryConstants.DESC_SEPARATOR_BYTE
+			    || (!exclusiveUpper && (fieldIndex < schema.getMaxFields() || inclusiveUpper || exclusiveLower)))) {
+				key[offset++] = sepByte;
+				// Set lastInclusiveUpperSingleKey back to false if this is the last pk column
+				// as we don't want to increment the null byte in this case
+				lastInclusiveUpperSingleKey &= i < schema.getMaxFields() - 1;
+			} else {
+				// 2016-12-30 modified by mini666 adding else.
+				if (RowKeyUtil.isExtraOrdinaryTable(table) && (i + 1) != slotEndIndex) {	// 마지막 slot은 구분자 안붙임.
+					key[offset++] = sepByte;
+				}
+			}
+			
+			if (exclusiveUpper) {
+				// Cannot include anything else on the key, as otherwise
+				// keys that match the upper range will be included. For example WHERE k1 < 2 and k2 = 3
+				// would match k1 = 2, k2 = 3 which is wrong.
+				break;
+			}
+			// If we are setting the lower bound with an exclusive range key, we need to bump the
+			// slot up for each key part. For an upper bound, we bump up an inclusive key, but
+			// only after the last key part.
+			if (exclusiveLower) {
+				if (!ByteUtil.nextKey(key, offset)) {
+					// Special case for not being able to increment.
+					// In this case we return a negative byteOffset to
+					// remove this part from the key being formed. Since the
+					// key has overflowed, this means that we should not
+					// have an end key specified.
+					return -byteOffset;
+				}
+				// We're filtering on values being non null here, but we still need the 0xFF
+				// terminator, since DESC keys ignore the last byte as it's expected to be
+				// the terminator. Without this, we'd ignore the separator byte that was
+				// just added and incremented.
+				if (!isFixedWidth && bytes.length == 0
+				    && SchemaUtil.getSeparatorByte(table, schema.rowKeyOrderOptimizable(), false, field) == QueryConstants.DESC_SEPARATOR_BYTE) {
+					key[offset++] = QueryConstants.DESC_SEPARATOR_BYTE;
+				}
+			}
+
+			fieldIndex += slotSpan[i] + 1;
+		}
+		if (lastInclusiveUpperSingleKey || anyInclusiveUpperRangeKey || lastUnboundUpper) {
+			if (!ByteUtil.nextKey(key, offset)) {
+				// Special case for not being able to increment.
+				// In this case we return a negative byteOffset to
+				// remove this part from the key being formed. Since the
+				// key has overflowed, this means that we should not
+				// have an end key specified.
+				return -byteOffset;
+			}
+		}
+		// Remove trailing separator bytes, since the columns may have been added
+		// after the table has data, in which case there won't be a separator
+		// byte.
+		if (bound == Bound.LOWER) {
+			while (--i >= schemaStartIndex && offset > byteOffset && !(field = schema.getField(--fieldIndex)).getDataType().isFixedWidth()
+			    && field.getSortOrder() == SortOrder.ASC && key[offset - 1] == QueryConstants.SEPARATOR_BYTE) {
+				offset--;
+				fieldIndex -= slotSpan[i];
+			}
+		}
+		return offset - byteOffset;
+	}
+  /////////////////////////////////////////////////////////////////
+	
     /*
      * Set the key by appending the keyRanges inside slots at positions as specified by the position array.
      * 

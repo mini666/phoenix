@@ -174,7 +174,7 @@ public class SaltedScanRangesTest {
         List<List<KeyRange>> slots = Lists.transform(Lists.newArrayList(ranges), ARRAY_TO_LIST);
         slots = new ArrayList<>(slots);
         slots.add(0, Collections.singletonList(KeyRange.getKeyRange(new byte[]{0})));
-        RowKeySchemaBuilder builder = new RowKeySchemaBuilder(10);
+        RowKeySchemaBuilder builder = new RowKeySchemaBuilder(null, 10);		// 2017-01-03 modified by mini666 - RowKeySchema 변경에 따른 수정.
         builder.addField(SaltingUtil.SALTING_COLUMN, false, SortOrder.getDefault());
         for (final int width : widths) {
             if (width > 0) {

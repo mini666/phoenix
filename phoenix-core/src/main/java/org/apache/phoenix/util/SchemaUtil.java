@@ -74,6 +74,7 @@ import org.apache.phoenix.schema.SaltingUtil;
 import org.apache.phoenix.schema.SortOrder;
 import org.apache.phoenix.schema.TableProperty;
 import org.apache.phoenix.schema.ValueSchema.Field;
+import org.apache.phoenix.schema.rowkey.RowKeyUtil;
 import org.apache.phoenix.schema.types.PDataType;
 import org.apache.phoenix.schema.types.PVarbinary;
 import org.apache.phoenix.schema.types.PVarchar;
@@ -122,7 +123,7 @@ public class SchemaUtil {
         }
         
     };
-    public static final RowKeySchema VAR_BINARY_SCHEMA = new RowKeySchemaBuilder(1).addField(VAR_BINARY_DATUM, false, SortOrder.getDefault()).build();
+    public static final RowKeySchema VAR_BINARY_SCHEMA = new RowKeySchemaBuilder(null, 1).addField(VAR_BINARY_DATUM, false, SortOrder.getDefault()).build();		// 2017-01-03 modified by mini666 - RowKeySchema 변경에 따른 수정.
     public static final String SCHEMA_FOR_DEFAULT_NAMESPACE = "DEFAULT";
     public static final String HBASE_NAMESPACE = "HBASE";
     public static final List<String> NOT_ALLOWED_SCHEMA_LIST = Arrays.asList(SCHEMA_FOR_DEFAULT_NAMESPACE,
@@ -714,6 +715,28 @@ public class SchemaUtil {
         return nTerminators;
     }
 
+    // 2017-01-02 added by mini666
+    public static int getMaxKeyLength(PTable table, RowKeySchema schema, List<List<KeyRange>> slots) {
+//        int maxKeyLength = getTerminatorCount(schema) * 2;
+    		int maxKeyLength = 0;
+        for (List<KeyRange> slot : slots) {
+            int maxSlotLength = 0;
+            for (KeyRange range : slot) {
+                int maxRangeLength = Math.max(range.getLowerRange().length, range.getUpperRange().length);
+                if (maxSlotLength < maxRangeLength) {
+                    maxSlotLength = maxRangeLength;
+                }
+            }
+            maxKeyLength += maxSlotLength;
+        }
+        
+        if (RowKeyUtil.isSalt(table) || RowKeyUtil.hasDelimiter(table)) {
+        	maxKeyLength += slots.size() - 1;
+        }
+        
+        return maxKeyLength;
+    }
+
     public static int getMaxKeyLength(RowKeySchema schema, List<List<KeyRange>> slots) {
         int maxKeyLength = getTerminatorCount(schema) * 2;
         for (List<KeyRange> slot : slots) {
@@ -822,7 +845,19 @@ public class SchemaUtil {
         fullColumnName = fullColumnName.replaceAll(ESCAPE_CHARACTER, "");
        	return fullColumnName.trim();
     }
-    
+
+  // 2016-12-30 added by mini666
+  ////////////////////////////////////////////////
+	public static byte getSeparatorByte(PTable table, boolean rowKeyOrderOptimizable, boolean isNullValue, SortOrder sortOrder) {
+		return !rowKeyOrderOptimizable || isNullValue || sortOrder == SortOrder.ASC ? 
+				RowKeyUtil.isExtraOrdinaryTable(table) ? RowKeyUtil.getSeparator(table) : QueryConstants.SEPARATOR_BYTE : QueryConstants.DESC_SEPARATOR_BYTE;
+	}
+
+	public static byte getSeparatorByte(PTable table, boolean rowKeyOrderOptimizable, boolean isNullValue, Field f) {
+		return getSeparatorByte(table, rowKeyOrderOptimizable, isNullValue, f.getSortOrder());
+	}
+  ////////////////////////////////////////////////
+	
     /**
      * Return the separator byte to use based on:
      * @param rowKeyOrderOptimizable whether or not the table may optimize descending row keys. If the

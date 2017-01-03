@@ -97,10 +97,11 @@ public class RowKeyValueAccessor implements Writable   {
         this.hasSeparator = hasSeparator;
     }
 
-    private int index = -1; // Only available on client side
-    private int[] offsets;
-    private boolean isFixedLength;
-    private boolean hasSeparator;
+    // 2016-12-29 modified by mini666. private => protected.
+    protected int index = -1; // Only available on client side
+    protected int[] offsets;
+    protected boolean isFixedLength;
+    protected boolean hasSeparator;
 
     public int getIndex() {
         return index;

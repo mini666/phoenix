@@ -717,7 +717,7 @@ public class IndexMaintainer implements Writable, Iterable<ColumnReference> {
     // We have enough information to generate the index row key schema
     private RowKeySchema generateIndexRowKeySchema() {
         int nIndexedColumns = getIndexPkColumnCount() + (isMultiTenant ? 1 : 0) + (!isLocalIndex && nIndexSaltBuckets > 0 ? 1 : 0) + (viewIndexId != null ? 1 : 0) - getNumViewConstants();
-        RowKeySchema.RowKeySchemaBuilder builder = new RowKeySchema.RowKeySchemaBuilder(nIndexedColumns);
+        RowKeySchema.RowKeySchemaBuilder builder = new RowKeySchema.RowKeySchemaBuilder(null, nIndexedColumns);		// 2017-01-03 modified by mini666 - RowKeySchema 변경에 따른 수정.
         builder.rowKeyOrderOptimizable(rowKeyOrderOptimizable);
         if (!isLocalIndex && nIndexSaltBuckets > 0) {
             builder.addField(SaltingUtil.SALTING_COLUMN, false, SortOrder.ASC);

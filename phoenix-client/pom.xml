@@ -380,5 +380,11 @@
       <groupId>org.apache.phoenix</groupId>
       <artifactId>phoenix-spark</artifactId>
     </dependency>
-  </dependencies>
+<!-- added by mini666 -->
+    <dependency>
+      <groupId>com.yammer.metrics</groupId>
+      <artifactId>metrics-core</artifactId>
+      <version>2.1.2</version>
+    </dependency>
+ </dependencies>
 </project>

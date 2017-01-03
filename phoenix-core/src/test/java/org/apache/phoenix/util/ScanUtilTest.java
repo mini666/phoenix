@@ -54,7 +54,7 @@ public class ScanUtilTest {
     private final Bound bound;
 
     public ScanUtilTest(List<List<KeyRange>> slots, int[] widths, byte[] expectedKey, Bound bound) throws Exception {
-        RowKeySchemaBuilder builder = new RowKeySchemaBuilder(widths.length);
+        RowKeySchemaBuilder builder = new RowKeySchemaBuilder(null, widths.length);		// 2017-01-03 modified by mini666 - RowKeySchema 변경에 따른 수정.
         for (final int width : widths) {
             if (width > 0) {
                 builder.addField(new PDatum() {

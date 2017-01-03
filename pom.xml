@@ -639,6 +639,12 @@
         <type>test-jar</type>
         <scope>test</scope>
       </dependency>
+<!-- 2016.12.30 added by mini666 -->
+      <dependency>
+        <groupId>org.apache.hbase</groupId>
+        <artifactId>hbase-procedure</artifactId>
+        <version>${hbase.version}</version>
+      </dependency>
       <dependency>
         <groupId>org.apache.hbase</groupId>
         <artifactId>hbase-hadoop-compat</artifactId>

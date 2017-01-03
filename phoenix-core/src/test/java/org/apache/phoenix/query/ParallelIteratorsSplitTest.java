@@ -257,7 +257,7 @@ public class ParallelIteratorsSplitTest extends BaseConnectionlessQueryTest {
     }
 
     private static RowKeySchema buildSchema(int[] widths) {
-        RowKeySchemaBuilder builder = new RowKeySchemaBuilder(10);
+        RowKeySchemaBuilder builder = new RowKeySchemaBuilder(null, 10);		// 2017-01-03 modified by mini666 - RowKeySchema 변경에 따른 수정.
         for (final int width : widths) {
             builder.addField(new PDatum() {
                 @Override

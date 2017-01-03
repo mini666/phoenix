@@ -36,7 +36,7 @@ import junit.framework.TestCase;
 
 public class DistinctPrefixFilterTest extends TestCase {
     private DistinctPrefixFilter createFilter(int[] widths, int prefixLength) {
-        RowKeySchemaBuilder builder = new RowKeySchemaBuilder(widths.length);
+        RowKeySchemaBuilder builder = new RowKeySchemaBuilder(null, widths.length);		// 2017-01-03 modified by mini666 - RowKeySchema 변경에 따른 수정.
         for (final int width : widths) {
             builder.addField(
                 new PDatum() {

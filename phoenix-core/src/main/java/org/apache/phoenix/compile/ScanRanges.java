@@ -37,10 +37,12 @@ import org.apache.phoenix.filter.SkipScanFilter;
 import org.apache.phoenix.query.KeyRange;
 import org.apache.phoenix.query.KeyRange.Bound;
 import org.apache.phoenix.query.QueryConstants;
+import org.apache.phoenix.schema.PTable;
 import org.apache.phoenix.schema.RowKeySchema;
 import org.apache.phoenix.schema.SaltingUtil;
 import org.apache.phoenix.schema.SortOrder;
 import org.apache.phoenix.schema.ValueSchema.Field;
+import org.apache.phoenix.schema.rowkey.RowKeyUtil;
 import org.apache.phoenix.util.ByteUtil;
 import org.apache.phoenix.util.ScanUtil;
 import org.apache.phoenix.util.ScanUtil.BytesComparator;
@@ -73,6 +75,90 @@ public class ScanRanges {
         return create(schema, ranges, ScanUtil.getDefaultSlotSpans(ranges.size()), KeyRange.EVERYTHING_RANGE, nBuckets, useSkipSan, -1);
     }
 
+    // 2016-12-30 added by mini666
+    public static ScanRanges create(PTable table, RowKeySchema schema, List<List<KeyRange>> ranges, int[] slotSpan, KeyRange minMaxRange, Integer nBuckets, boolean useSkipScan, int rowTimestampColIndex) {
+    	int offset = nBuckets == null ? 0 : SaltingUtil.NUM_SALTING_BYTES;
+      int nSlots = ranges.size();
+      if (nSlots == offset && minMaxRange == KeyRange.EVERYTHING_RANGE) {
+          return EVERYTHING;
+      } else if (minMaxRange == KeyRange.EMPTY_RANGE || (nSlots == 1 + offset && ranges.get(offset).size() == 1 && ranges.get(offset).get(0) == KeyRange.EMPTY_RANGE)) {
+          return NOTHING;
+      }
+      TimeRange rowTimestampRange = getRowTimestampColumnRange(ranges, schema, rowTimestampColIndex);
+      boolean isPointLookup = isPointLookup(schema, ranges, slotSpan, useSkipScan);
+      if (isPointLookup) {
+          // TODO: consider keeping original to use for serialization as it would be smaller?
+          List<byte[]> keys = ScanRanges.getPointKeys(table, ranges, slotSpan, schema, nBuckets);
+          List<KeyRange> keyRanges = Lists.newArrayListWithExpectedSize(keys.size());
+          KeyRange unsaltedMinMaxRange = minMaxRange;
+          if (nBuckets != null && minMaxRange != KeyRange.EVERYTHING_RANGE) {
+              unsaltedMinMaxRange = KeyRange.getKeyRange(
+                      stripPrefix(minMaxRange.getLowerRange(),offset),
+                      minMaxRange.lowerUnbound(), 
+                      stripPrefix(minMaxRange.getUpperRange(),offset), 
+                      minMaxRange.upperUnbound());
+          }
+          // We have full keys here, so use field from our varbinary schema
+          BytesComparator comparator = ScanUtil.getComparator(SchemaUtil.VAR_BINARY_SCHEMA.getField(0));
+          for (byte[] key : keys) {
+              // Filter now based on unsalted minMaxRange and ignore the point key salt byte
+              if ( unsaltedMinMaxRange.compareLowerToUpperBound(key, offset, key.length-offset, true, comparator) <= 0 &&
+                   unsaltedMinMaxRange.compareUpperToLowerBound(key, offset, key.length-offset, true, comparator) >= 0) {
+                  keyRanges.add(KeyRange.getKeyRange(key));
+              }
+          }
+          ranges = Collections.singletonList(keyRanges);
+          useSkipScan = keyRanges.size() > 1;
+          // Treat as binary if descending because we've got a separator byte at the end
+          // which is not part of the value.
+          if (keys.size() > 1 || SchemaUtil.getSeparatorByte(schema.rowKeyOrderOptimizable(), false, schema.getField(schema.getFieldCount()-1)) == QueryConstants.DESC_SEPARATOR_BYTE) {
+              schema = SchemaUtil.VAR_BINARY_SCHEMA;
+              slotSpan = ScanUtil.SINGLE_COLUMN_SLOT_SPAN;
+          } else {
+              // Keep original schema and don't use skip scan as it's not necessary
+              // when there's a single key.
+              slotSpan = new int[] {schema.getMaxFields()-1};
+          }
+      }
+      List<List<KeyRange>> sortedRanges = Lists.newArrayListWithExpectedSize(ranges.size());
+      for (int i = 0; i < ranges.size(); i++) {
+          List<KeyRange> sorted = Lists.newArrayList(ranges.get(i));
+          Collections.sort(sorted, KeyRange.COMPARATOR);
+          sortedRanges.add(ImmutableList.copyOf(sorted));
+      }
+      
+      
+      // Don't set minMaxRange for point lookup because it causes issues during intersect
+      // by going across region boundaries
+      KeyRange scanRange = KeyRange.EVERYTHING_RANGE;
+      // if (!isPointLookup && (nBuckets == null || !useSkipScanFilter)) {
+      // if (! ( isPointLookup || (nBuckets != null && useSkipScanFilter) ) ) {
+      // if (nBuckets == null || (nBuckets != null && (!isPointLookup || !useSkipScanFilter))) {
+      if (nBuckets == null || !isPointLookup || !useSkipScan) {
+          byte[] minKey = ScanUtil.getMinKey(table, schema, sortedRanges, slotSpan);
+          byte[] maxKey = ScanUtil.getMaxKey(table, schema, sortedRanges, slotSpan);
+          // If the maxKey has crossed the salt byte boundary, then we do not
+          // have anything to filter at the upper end of the range
+          if (ScanUtil.crossesPrefixBoundary(maxKey, ScanUtil.getPrefix(minKey, offset), offset)) {
+              maxKey = KeyRange.UNBOUND;
+          }
+          // We won't filter anything at the low end of the range if we just have the salt byte
+          if (minKey.length <= offset) {
+              minKey = KeyRange.UNBOUND;
+          }
+          scanRange = KeyRange.getKeyRange(minKey, maxKey);
+      }
+      if (minMaxRange != KeyRange.EVERYTHING_RANGE) {
+          minMaxRange = ScanUtil.convertToInclusiveExclusiveRange(minMaxRange, schema, new ImmutableBytesWritable());
+          scanRange = scanRange.intersect(minMaxRange);
+      }
+      
+      if (scanRange == KeyRange.EMPTY_RANGE) {
+          return NOTHING;
+      }
+      return new ScanRanges(schema, slotSpan, sortedRanges, scanRange, minMaxRange, useSkipScan, isPointLookup, nBuckets, rowTimestampRange);
+    }
+    
     public static ScanRanges create(RowKeySchema schema, List<List<KeyRange>> ranges, int[] slotSpan, KeyRange minMaxRange, Integer nBuckets, boolean useSkipScan, int rowTimestampColIndex) {
         int offset = nBuckets == null ? 0 : SaltingUtil.NUM_SALTING_BYTES;
         int nSlots = ranges.size();
@@ -520,6 +606,36 @@ public class ScanRanges {
         }
         return idx >= 0;
     }
+
+	// 2017-01-02 added by mini666
+	private static List<byte[]> getPointKeys(PTable table, List<List<KeyRange>> ranges, int[] slotSpan, RowKeySchema schema, Integer bucketNum) {
+		if (ranges == null || ranges.isEmpty()) {
+			return Collections.emptyList();
+		}
+		boolean isSalted = bucketNum != null;
+		int count = 1;
+		int offset = isSalted ? 1 : 0;
+		// Skip salt byte range in the first position if salted
+		for (int i = offset; i < ranges.size(); i++) {
+			count *= ranges.get(i).size();
+		}
+		List<byte[]> keys = Lists.newArrayListWithExpectedSize(count);
+		int[] position = new int[ranges.size()];
+		int maxKeyLength = SchemaUtil.getMaxKeyLength(table, schema, ranges);
+		int length;
+		byte[] key = new byte[maxKeyLength];
+		do {
+			length = ScanUtil.setKey(table, schema, ranges, slotSpan, position, Bound.LOWER, key, offset, offset, ranges.size(), offset);	// // 2017-01-02 modified by mini666 - adding table parameter
+			if (isSalted) {
+				// 2017-01-02 modified by mini666 - 솔트되어 있으면 바로 뒤에도 구분자가 있으므로 offset를 증가시키고 length를 감소.
+				offset++;
+				length--;
+				key[0] = SaltingUtil.getSaltingByte(key, offset, length, bucketNum);
+			}
+			keys.add(Arrays.copyOf(key, length + offset));
+		} while (incrementKey(ranges, position));
+		return keys;
+	}
 
     private static List<byte[]> getPointKeys(List<List<KeyRange>> ranges, int[] slotSpan, RowKeySchema schema, Integer bucketNum) {
         if (ranges == null || ranges.isEmpty()) {

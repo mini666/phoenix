@@ -17,11 +17,15 @@
  */
 package org.apache.phoenix.schema;
 
+import java.io.DataInput;
+import java.io.DataOutput;
+import java.io.IOException;
 import java.util.Collections;
 import java.util.List;
 
 import org.apache.hadoop.hbase.io.ImmutableBytesWritable;
 import org.apache.phoenix.query.QueryConstants;
+import org.apache.phoenix.schema.rowkey.RowKeyUtil;
 import org.apache.phoenix.util.SchemaUtil;
 
 
@@ -36,23 +40,46 @@ import org.apache.phoenix.util.SchemaUtil;
  * @since 0.1
  */
 public class RowKeySchema extends ValueSchema {
-    public static final RowKeySchema EMPTY_SCHEMA = new RowKeySchema(0,Collections.<Field>emptyList(), true)
-    ;
+    public static final RowKeySchema EMPTY_SCHEMA = new RowKeySchema(null, 0,Collections.<Field>emptyList(), true);		// 2017-01-03 modified by mini666 - adding table parameter to null
+    
+    // 2017-01-03 added by mini666
+    private PTable table;
+    private boolean extraOrdinaryTable;
+    private boolean hasDelimiter;
+    private byte rowKeyDelimiter;
     
     public RowKeySchema() {
     }
     
-    protected RowKeySchema(int minNullable, List<Field> fields, boolean rowKeyOrderOptimizable) {
-        super(minNullable, fields, rowKeyOrderOptimizable);
+    // 2017-01-03 modified by mini666 - Custom 구분자 적용.
+    protected RowKeySchema(PTable table, int minNullable, List<Field> fields, boolean rowKeyOrderOptimizable) {
+      super(minNullable, fields, rowKeyOrderOptimizable);
+      this.table = table;
+      
+      if (table != null) {
+	      extraOrdinaryTable = RowKeyUtil.isExtraOrdinaryTable(table);
+	      hasDelimiter = RowKeyUtil.hasDelimiter(table);
+	      rowKeyDelimiter = RowKeyUtil.getSeparator(table);
+      }
     }
+//    protected RowKeySchema(int minNullable, List<Field> fields, boolean rowKeyOrderOptimizable) {
+//        super(minNullable, fields, rowKeyOrderOptimizable);
+//    }
 
     public static class RowKeySchemaBuilder extends ValueSchemaBuilder {
         private boolean rowKeyOrderOptimizable = false;
+        private PTable table;
         
-        public RowKeySchemaBuilder(int maxFields) {
-            super(maxFields);
-            setMaxFields(maxFields);
+        // 2017-01-03 modified by mini666 - Custom 구분자 적용.
+        public RowKeySchemaBuilder(PTable table, int maxFields) {
+        	super(maxFields);
+        	setMaxFields(maxFields);
+        	this.table = table;
         }
+//        public RowKeySchemaBuilder(int maxFields) {
+//            super(maxFields);
+//            setMaxFields(maxFields);
+//        }
         
         @Override
         public RowKeySchemaBuilder addField(PDatum datum, boolean isNullable, SortOrder sortOrder) {
@@ -68,7 +95,7 @@ public class RowKeySchema extends ValueSchema {
         @Override
         public RowKeySchema build() {
             List<Field> condensedFields = buildFields();
-            return new RowKeySchema(this.minNullable, condensedFields, rowKeyOrderOptimizable);
+            return new RowKeySchema(table, this.minNullable, condensedFields, rowKeyOrderOptimizable);	// 2017-01-03 modified by mini666 - adding table parameter.
         }
     }
 
@@ -156,12 +183,22 @@ public class RowKeySchema extends ValueSchema {
         }
         Field field = this.getField(position);
         if (field.getDataType().isFixedWidth()) {
-            ptr.set(ptr.get(),ptr.getOffset(), field.getByteSize());
+        		// 2017-01-03 modified by mini666.
+        		if (extraOrdinaryTable) {
+        			ptr.set(ptr.get(), ptr.getOffset() + (position == 0 ? 0 : 1), field.getByteSize());	// 구분자 처리.
+        		} else {
+        			ptr.set(ptr.get(),ptr.getOffset(), field.getByteSize());
+        		}
         } else {
             if (position+1 == getFieldCount() ) {
                 // Last field has no terminator unless it's descending sort order
                 int len = maxOffset - ptr.getOffset();
-                ptr.set(ptr.get(), ptr.getOffset(), maxOffset - ptr.getOffset() - (SchemaUtil.getSeparatorByte(rowKeyOrderOptimizable, len == 0, field) == QueryConstants.DESC_SEPARATOR_BYTE ? 1 : 0));
+            		// 2017-01-03 modified by mini666.
+            		if (extraOrdinaryTable) {
+            			ptr.set(ptr.get(), ptr.getOffset() + (position == 0 ? 0 : 1), maxOffset - ptr.getOffset() - (SchemaUtil.getSeparatorByte(rowKeyOrderOptimizable, len == 0, field) == QueryConstants.DESC_SEPARATOR_BYTE ? 1 : 0));
+            		} else {
+            			ptr.set(ptr.get(), ptr.getOffset(), maxOffset - ptr.getOffset() - (SchemaUtil.getSeparatorByte(rowKeyOrderOptimizable, len == 0, field) == QueryConstants.DESC_SEPARATOR_BYTE ? 1 : 0));
+            		}
             } else {
                 byte[] buf = ptr.get();
                 int offset = ptr.getOffset();
@@ -172,7 +209,12 @@ public class RowKeySchema extends ValueSchema {
                         offset++;
                     } while (offset < maxOffset && buf[offset] != sepByte);
                 }
-                ptr.set(buf, ptr.getOffset(), offset - ptr.getOffset());
+            		// 2017-01-03 modified by mini666.
+            		if (extraOrdinaryTable) {
+            			ptr.set(buf, ptr.getOffset() + (position == 0 ? 0 : 1), offset - ptr.getOffset());
+            		} else {
+            			ptr.set(buf, ptr.getOffset(), offset - ptr.getOffset());
+            		}
             }
         }
         return ptr.getLength() > 0;
@@ -343,4 +385,23 @@ public class RowKeySchema extends ValueSchema {
         int finalLength = ptr.getOffset() - initialOffset + ptr.getLength();
         ptr.set(ptr.get(), initialOffset, finalLength);
     }
+
+    // 2017-01-03 added by mini666
+		@Override
+		public void readFields(DataInput in) throws IOException {
+			super.readFields(in);
+			
+			this.extraOrdinaryTable = in.readBoolean();
+			this.hasDelimiter = in.readBoolean();
+			this.rowKeyDelimiter = in.readByte();
+		}
+
+		@Override
+		public void write(DataOutput out) throws IOException {
+			super.write(out);
+			
+			out.writeBoolean(extraOrdinaryTable);
+			out.writeBoolean(hasDelimiter);
+			out.writeByte(rowKeyDelimiter);
+		}
 }

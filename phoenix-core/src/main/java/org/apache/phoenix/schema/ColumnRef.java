@@ -17,6 +17,10 @@
  */
 package org.apache.phoenix.schema;
 
+import java.sql.DriverManager;
+import java.sql.SQLException;
+import java.util.Arrays;
+
 import org.apache.hadoop.hbase.io.ImmutableBytesWritable;
 import org.apache.http.annotation.Immutable;
 import org.apache.phoenix.compile.ExpressionCompiler;
@@ -30,13 +34,11 @@ import org.apache.phoenix.jdbc.PhoenixConnection;
 import org.apache.phoenix.jdbc.PhoenixStatement;
 import org.apache.phoenix.parse.ParseNode;
 import org.apache.phoenix.parse.SQLParser;
+import org.apache.phoenix.schema.rowkey.DelimiterRowKeyValueAccessor;
+import org.apache.phoenix.schema.rowkey.RowKeyUtil;
 import org.apache.phoenix.util.ExpressionUtil;
 import org.apache.phoenix.util.PhoenixRuntime;
 import org.apache.phoenix.util.SchemaUtil;
-
-import java.sql.DriverManager;
-import java.sql.SQLException;
-import java.util.Arrays;
 
 
 /**
@@ -115,7 +117,9 @@ public class ColumnRef {
         if (SchemaUtil.isPKColumn(column)) {
             return new RowKeyColumnExpression(
                     column, 
-                    new RowKeyValueAccessor(table.getPKColumns(), pkSlotPosition),
+                    // 2016-12-29 modified by mini666.
+                    RowKeyUtil.createRowKeyValueAccessor(table, pkSlotPosition),
+//                    new RowKeyValueAccessor(table.getPKColumns(), pkSlotPosition),
                     displayName);
         }
         

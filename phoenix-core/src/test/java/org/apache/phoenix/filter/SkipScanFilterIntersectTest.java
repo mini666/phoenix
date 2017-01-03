@@ -532,7 +532,7 @@ public class SkipScanFilterIntersectTest {
             byte[] upperExclusive, KeyRange[][] expectedRanges) {
         List<List<KeyRange>> slots = Lists.transform(Lists.newArrayList(ranges), ARRAY_TO_LIST);
         List<List<KeyRange>> expectedSlots = expectedRanges == null ? null : Lists.transform(Lists.newArrayList(expectedRanges), ARRAY_TO_LIST);
-        RowKeySchemaBuilder builder = new RowKeySchemaBuilder(10);
+        RowKeySchemaBuilder builder = new RowKeySchemaBuilder(null, 10);		// 2017-01-03 modified by mini666 - RowKeySchema 변경에 따른 수정.
         for (final int width: widths) {
             builder.addField(
                     new PDatum() {
