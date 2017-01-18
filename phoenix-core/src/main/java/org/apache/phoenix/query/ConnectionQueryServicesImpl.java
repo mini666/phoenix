@@ -70,6 +70,7 @@ import java.util.concurrent.atomic.AtomicBoolean;
 import javax.annotation.concurrent.GuardedBy;
 
 import org.apache.hadoop.conf.Configuration;
+import org.apache.hadoop.fs.Path;
 import org.apache.hadoop.hbase.HColumnDescriptor;
 import org.apache.hadoop.hbase.HConstants;
 import org.apache.hadoop.hbase.HRegionLocation;
@@ -231,6 +232,7 @@ public class ConnectionQueryServicesImpl extends DelegateQueryServices implement
     private static final int DEFAULT_OUT_OF_ORDER_MUTATIONS_WAIT_TIME_MS = 1000;
     private static final int TTL_FOR_MUTEX = 15 * 60; // 15min 
     protected final Configuration config;
+    protected final Configuration phoenixConfig;				// 2017-01-17 added by mini666
     private final ConnectionInfo connectionInfo;
     // Copy of config.getProps(), but read-only to prevent synchronization that we
     // don't need.
@@ -254,6 +256,7 @@ public class ConnectionQueryServicesImpl extends DelegateQueryServices implement
     private final boolean returnSequenceValues ;
 
     private HConnection connection;
+    private HConnection phoenixConnection;						// 2017-01-17 added by mini666
     private TransactionServiceClient txServiceClient;
     private volatile boolean initialized;
     private volatile int nSequenceSaltBuckets;
@@ -281,6 +284,7 @@ public class ConnectionQueryServicesImpl extends DelegateQueryServices implement
 
     // 2016-12-29 added by mini666
     private static final String ALREADY_EXIST_TABLE = "ALREADY_EXIST";
+    private static final String COPROCESSOR_JAR_PATH = "COPROCESSOR_JAR_PATH";			// 2017-01-17 added by mini666
     
     private static interface FeatureSupported {
         boolean isSupported(ConnectionQueryServices services);
@@ -332,7 +336,9 @@ public class ConnectionQueryServicesImpl extends DelegateQueryServices implement
 
         // Without making a copy of the configuration we cons up, we lose some of our properties
         // on the server side during testing.
-        this.config = HBaseFactoryProvider.getConfigurationFactory().getConfiguration(config);
+        this.config = HBaseFactoryProvider.getConfigurationFactory().getConfiguration();
+//        this.config = HBaseFactoryProvider.getConfigurationFactory().getConfiguration(config);							// 2017-01-17 commented by mini666 - config parameter removed.
+        this.phoenixConfig = HBaseFactoryProvider.getConfigurationFactory().getPhoenixConfiguration(config);	// 2017-01-17 added by mini666
         // set replication required parameter
         ConfigUtil.setReplicationConfigIfAbsent(this.config);
         this.props = new ReadOnlyProps(this.config.iterator());
@@ -397,6 +403,7 @@ public class ConnectionQueryServicesImpl extends DelegateQueryServices implement
                 initTxServiceClient();
             }
             this.connection = HBaseFactoryProvider.getHConnectionFactory().createConnection(this.config);
+            this.phoenixConnection = HBaseFactoryProvider.getHConnectionFactory().createConnection(this.phoenixConfig);			// 2017-01-17 added by mini666
         } catch (IOException e) {
             throw new SQLExceptionInfo.Builder(SQLExceptionCode.CANNOT_ESTABLISH_CONNECTION)
             .setRootCause(e).build().buildException();
@@ -409,7 +416,12 @@ public class ConnectionQueryServicesImpl extends DelegateQueryServices implement
     @Override
     public HTableInterface getTable(byte[] tableName) throws SQLException {
         try {
-            return HBaseFactoryProvider.getHTableFactory().getTable(tableName, connection, null);
+        		// 2017-01-17 modified by mini666
+        		if (Bytes.toString(tableName).startsWith("SYSTEM:")) {
+        			return HBaseFactoryProvider.getHTableFactory().getTable(tableName, phoenixConnection, null);
+        		} else {
+        			return HBaseFactoryProvider.getHTableFactory().getTable(tableName, connection, null);
+        		}
         } catch (org.apache.hadoop.hbase.TableNotFoundException e) {
             throw new TableNotFoundException(SchemaUtil.getSchemaNameFromFullName(tableName), SchemaUtil.getTableNameFromFullName(tableName));
         } catch (IOException e) {
@@ -460,7 +472,8 @@ public class ConnectionQueryServicesImpl extends DelegateQueryServices implement
             SQLException sqlE = null;
             try {
                 // Attempt to return any unused sequences.
-                if (connection != null) returnAllSequences(this.sequenceMap);
+//                if (connection != null) returnAllSequences(this.sequenceMap);			// 2017-01-17 commented by mini666 - sequence is system table.
+                if (phoenixConnection != null) returnAllSequences(this.sequenceMap);
             } catch (SQLException e) {
                 sqlE = e;
             } finally {
@@ -474,6 +487,7 @@ public class ConnectionQueryServicesImpl extends DelegateQueryServices implement
                         latestMetaDataLock.notifyAll();
                     }
                     if (connection != null) connection.close();
+                    if (phoenixConnection != null) phoenixConnection.close();			// 2017-01-17 added by mini666
                 } catch (IOException e) {
                     if (sqlE == null) {
                         sqlE = ServerUtil.parseServerException(e);
@@ -521,7 +535,12 @@ public class ConnectionQueryServicesImpl extends DelegateQueryServices implement
 
     @Override
     public void clearTableRegionCache(byte[] tableName) throws SQLException {
-        connection.clearRegionCache(TableName.valueOf(tableName));
+    		// 2017-01-17 modified by mini666 - adding if statement
+    		if (Bytes.toString(tableName).startsWith("SYSTEM:")) {
+    			phoenixConnection.clearRegionCache(TableName.valueOf(tableName));
+    		} else {
+    			connection.clearRegionCache(TableName.valueOf(tableName));
+    		}
     }
 
     @Override
@@ -753,7 +772,7 @@ public class ConnectionQueryServicesImpl extends DelegateQueryServices implement
                 SchemaUtil.getPhysicalHBaseTableName(tableName, isNamespaceMapped, tableType).getBytes());
         for (Entry<String,Object> entry : tableProps.entrySet()) {
             String key = entry.getKey();
-            if (!TableProperty.isPhoenixTableProperty(key)) {
+            if (!TableProperty.isPhoenixTableProperty(key) && !COPROCESSOR_JAR_PATH.equals(key)) {						// 2017-01-17 modified by mini666 - Coprocessor를 위한 Jar Path 추가.
                 Object value = entry.getValue();
                 tableDescriptor.setValue(key, value == null ? null : value.toString());
             }
@@ -796,7 +815,8 @@ public class ConnectionQueryServicesImpl extends DelegateQueryServices implement
         // PHOENIX-3072: Set index priority if this is a system table or index table
         if (tableType == PTableType.SYSTEM) {
             tableDescriptor.setValue(QueryConstants.PRIORITY,
-                    String.valueOf(PhoenixRpcSchedulerFactory.getMetadataPriority(config)));
+//                    String.valueOf(PhoenixRpcSchedulerFactory.getMetadataPriority(config)));					// 2017-01-17 modified by mini666
+            				String.valueOf(PhoenixRpcSchedulerFactory.getMetadataPriority(phoenixConfig)));
         } else if (tableType == PTableType.INDEX // Global, mutable index
                 && !isLocalIndexTable(tableDescriptor.getFamiliesKeys())
                 && !Boolean.TRUE.equals(tableProps.get(PhoenixDatabaseMetaData.IMMUTABLE_ROWS))) {
@@ -821,17 +841,27 @@ public class ConnectionQueryServicesImpl extends DelegateQueryServices implement
         // The phoenix jar must be available on HBase classpath
         int priority = props.getInt(QueryServices.COPROCESSOR_PRIORITY_ATTRIB, QueryServicesOptions.DEFAULT_COPROCESSOR_PRIORITY);
         try {
+        		// 2017-01-17 added by mini666 - HBase를 재시작할 수 없고 Phoenix를 적용하고자 할 경우 처리
+        		Path jarPath = null;	// HBase 기동시 phoenix library 물고 올라간 경우는 null, 그렇지 않으면 HDFS에서 읽어온다. 
+        		if (tableProps.get(ALREADY_EXIST_TABLE) != null) {
+        			jarPath = new Path(((String)tableProps.get(COPROCESSOR_JAR_PATH)).replace("\"", ""));			// hdfs://<namenode>[:<port>]/user/<hadoop-user>/xxxx.jar
+        		}
+        		
             if (!descriptor.hasCoprocessor(ScanRegionObserver.class.getName())) {
-                descriptor.addCoprocessor(ScanRegionObserver.class.getName(), null, priority, null);
+//                descriptor.addCoprocessor(ScanRegionObserver.class.getName(), null, priority, null);			// 2017-01-17 modified by mini666
+                descriptor.addCoprocessor(ScanRegionObserver.class.getName(), jarPath, priority, null);
             }
             if (!descriptor.hasCoprocessor(UngroupedAggregateRegionObserver.class.getName())) {
-                descriptor.addCoprocessor(UngroupedAggregateRegionObserver.class.getName(), null, priority, null);
+//                descriptor.addCoprocessor(UngroupedAggregateRegionObserver.class.getName(), null, priority, null);			// 2017-01-17 modified by mini666
+                descriptor.addCoprocessor(UngroupedAggregateRegionObserver.class.getName(), jarPath, priority, null);
             }
             if (!descriptor.hasCoprocessor(GroupedAggregateRegionObserver.class.getName())) {
-                descriptor.addCoprocessor(GroupedAggregateRegionObserver.class.getName(), null, priority, null);
+//                descriptor.addCoprocessor(GroupedAggregateRegionObserver.class.getName(), null, priority, null);			// 2017-01-17 modified by mini666
+                descriptor.addCoprocessor(GroupedAggregateRegionObserver.class.getName(), jarPath, priority, null);
             }
             if (!descriptor.hasCoprocessor(ServerCachingEndpointImpl.class.getName())) {
-                descriptor.addCoprocessor(ServerCachingEndpointImpl.class.getName(), null, priority, null);
+//                descriptor.addCoprocessor(ServerCachingEndpointImpl.class.getName(), null, priority, null);			// 2017-01-17 modified by mini666
+                descriptor.addCoprocessor(ServerCachingEndpointImpl.class.getName(), jarPath, priority, null);
             }
             boolean isTransactional =
                     Boolean.TRUE.equals(tableProps.get(TableProperty.TRANSACTIONAL.name())) ||
@@ -845,7 +875,8 @@ public class ConnectionQueryServicesImpl extends DelegateQueryServices implement
                     && !SchemaUtil.isStatsTable(tableName)) {
                 if (isTransactional) {
                     if (!descriptor.hasCoprocessor(PhoenixTransactionalIndexer.class.getName())) {
-                        descriptor.addCoprocessor(PhoenixTransactionalIndexer.class.getName(), null, priority, null);
+//                        descriptor.addCoprocessor(PhoenixTransactionalIndexer.class.getName(), null, priority, null);			// 2017-01-17 modified by mini666
+                        descriptor.addCoprocessor(PhoenixTransactionalIndexer.class.getName(), jarPath, priority, null);
                     }
                     // For alter table, remove non transactional index coprocessor
                     if (descriptor.hasCoprocessor(Indexer.class.getName())) {
@@ -864,16 +895,16 @@ public class ConnectionQueryServicesImpl extends DelegateQueryServices implement
                 }
             }
             if (SchemaUtil.isStatsTable(tableName) && !descriptor.hasCoprocessor(MultiRowMutationEndpoint.class.getName())) {
-                descriptor.addCoprocessor(MultiRowMutationEndpoint.class.getName(),
-                        null, priority, null);
+//                descriptor.addCoprocessor(MultiRowMutationEndpoint.class.getName(), null, priority, null);			// 2017-01-17 modified by mini666
+                descriptor.addCoprocessor(MultiRowMutationEndpoint.class.getName(), jarPath, priority, null);
             }
 
             Set<byte[]> familiesKeys = descriptor.getFamiliesKeys();
             for(byte[] family: familiesKeys) {
                 if(Bytes.toString(family).startsWith(QueryConstants.LOCAL_INDEX_COLUMN_FAMILY_PREFIX)) {
                     if (!descriptor.hasCoprocessor(IndexHalfStoreFileReaderGenerator.class.getName())) {
-                        descriptor.addCoprocessor(IndexHalfStoreFileReaderGenerator.class.getName(),
-                                null, priority, null);
+//                        descriptor.addCoprocessor(IndexHalfStoreFileReaderGenerator.class.getName(), null, priority, null);			// 2017-01-17 modified by mini666
+                        descriptor.addCoprocessor(IndexHalfStoreFileReaderGenerator.class.getName(), jarPath, priority, null);
                         break;
                     }
                 }
@@ -883,22 +914,26 @@ public class ConnectionQueryServicesImpl extends DelegateQueryServices implement
             // stay on the same region.
             if (SchemaUtil.isMetaTable(tableName) || SchemaUtil.isFunctionTable(tableName)) {
                 if (!descriptor.hasCoprocessor(MetaDataEndpointImpl.class.getName())) {
-                    descriptor.addCoprocessor(MetaDataEndpointImpl.class.getName(), null, priority, null);
+//                    descriptor.addCoprocessor(MetaDataEndpointImpl.class.getName(), null, priority, null);			// 2017-01-17 modified by mini666
+                    descriptor.addCoprocessor(MetaDataEndpointImpl.class.getName(), jarPath, priority, null);
                 }
                 if(SchemaUtil.isMetaTable(tableName) ) {
                     if (!descriptor.hasCoprocessor(MetaDataRegionObserver.class.getName())) {
-                        descriptor.addCoprocessor(MetaDataRegionObserver.class.getName(), null, priority + 1, null);
+//                        descriptor.addCoprocessor(MetaDataRegionObserver.class.getName(), null, priority + 1, null);			// 2017-01-17 modified by mini666
+                        descriptor.addCoprocessor(MetaDataRegionObserver.class.getName(), jarPath, priority + 1, null);
                     }
                 }
             } else if (SchemaUtil.isSequenceTable(tableName)) {
                 if (!descriptor.hasCoprocessor(SequenceRegionObserver.class.getName())) {
-                    descriptor.addCoprocessor(SequenceRegionObserver.class.getName(), null, priority, null);
+//                    descriptor.addCoprocessor(SequenceRegionObserver.class.getName(), null, priority, null);			// 2017-01-17 modified by mini666
+                    descriptor.addCoprocessor(SequenceRegionObserver.class.getName(), jarPath, priority, null);
                 }
             }
 
             if (isTransactional) {
                 if (!descriptor.hasCoprocessor(PhoenixTransactionalProcessor.class.getName())) {
-                    descriptor.addCoprocessor(PhoenixTransactionalProcessor.class.getName(), null, priority - 10, null);
+//                    descriptor.addCoprocessor(PhoenixTransactionalProcessor.class.getName(), null, priority - 10, null);			// 2017-01-17 modified by mini666
+                    descriptor.addCoprocessor(PhoenixTransactionalProcessor.class.getName(), jarPath, priority - 10, null);
                 }
             } else {
                 // If exception on alter table to transition back to non transactional
@@ -1024,9 +1059,9 @@ public class ConnectionQueryServicesImpl extends DelegateQueryServices implement
         boolean isMetaTable = SchemaUtil.isMetaTable(tableName);
         byte[] physicalTable = SchemaUtil.getPhysicalHBaseTableName(tableName, isNamespaceMapped, tableType).getBytes();
         boolean tableExist = true;
-        try (HBaseAdmin admin = getAdmin()) {
-            final String quorum = ZKConfig.getZKQuorumServersString(config);
-            final String znode = this.props.get(HConstants.ZOOKEEPER_ZNODE_PARENT);
+        try (HBaseAdmin admin = Bytes.toString(physicalTable).startsWith("SYSTEM:") ? getPhoenixAdmin() : getAdmin()) {
+            final String quorum = tableType == PTableType.SYSTEM ? ZKConfig.getZKQuorumServersString(phoenixConfig) : ZKConfig.getZKQuorumServersString(config);		// 2017-01-17 modified by mini666
+            final String znode = tableType == PTableType.SYSTEM ? phoenixConfig.get(HConstants.ZOOKEEPER_ZNODE_PARENT) : this.props.get(HConstants.ZOOKEEPER_ZNODE_PARENT);		// 2017-01-17 modified by mini666
             logger.debug("Found quorum: " + quorum + ":" + znode);
             try {
                 existingDesc = admin.getTableDescriptor(physicalTable);
@@ -1277,7 +1312,8 @@ public class ConnectionQueryServicesImpl extends DelegateQueryServices implement
             boolean retried = false;
             while (true) {
                 if (retried) {
-                    connection.relocateRegion(SchemaUtil.getPhysicalName(tableName, this.getProps()), tableKey);
+//                    connection.relocateRegion(SchemaUtil.getPhysicalName(tableName, this.getProps()), tableKey);			// 2017-01-17 modified by mini666 - tableName is maybe system table.
+                    phoenixConnection.relocateRegion(SchemaUtil.getPhysicalName(tableName, this.getProps()), tableKey);
                 }
 
                 HTableInterface ht = this.getTable(SchemaUtil.getPhysicalName(tableName, this.getProps()).getName());
@@ -1553,6 +1589,16 @@ public class ConnectionQueryServicesImpl extends DelegateQueryServices implement
                 ensureViewIndexTableDropped(physicalName, timestamp);
                 ensureLocalIndexTableDropped(physicalName, timestamp);
                 tableStatsCache.invalidateAll(table);
+            } else if (tableType == PTableType.VIEW) {			// 2017-01-17 added by mini666 - adding else if statement
+            	HTableDescriptor tableDesc = this.getTableDescriptor(table.getName().getBytes());
+              
+              if (tableDesc.getValue(ALREADY_EXIST_TABLE) != null) {
+              	try (HBaseAdmin admin = this.getAdmin()) {
+              		restoreTable(admin, tableDesc);
+              	} catch (IOException e) {
+              		throw ServerUtil.parseServerException(e);
+              	}
+              }
             }
             break;
         default:
@@ -1634,6 +1680,18 @@ public class ConnectionQueryServicesImpl extends DelegateQueryServices implement
     	}
     }
     
+    // 2017-01-17 added by mini666 - 기존 테이블 지원 부분을 Configuration 분리 진행하면서 빠진 부분(뷰 삭제시 Coprocessor 삭제)이 발견되어 리팩토링함.
+    private void restoreTable(HBaseAdmin admin, HTableDescriptor tableDesc) throws SQLException {
+    	try {
+    		tableDesc.remove(ALREADY_EXIST_TABLE);
+      	removeCoprocessorsOfPhoenix(tableDesc);
+      	
+      	admin.modifyTable(tableDesc.getTableName().getName(), tableDesc);
+    	} catch (IOException e) {
+    		throw ServerUtil.parseServerException(e);
+    	}
+    }
+    
     private void dropTables(final List<byte[]> tableNamesToDelete) throws SQLException {
         SQLException sqlE = null;
         try (HBaseAdmin admin = getAdmin()) {
@@ -1645,10 +1703,7 @@ public class ConnectionQueryServicesImpl extends DelegateQueryServices implement
                         // 2016-12-29 modified by mini666
                         if (htableDesc.getValue(ALREADY_EXIST_TABLE) != null) {
                         	// 기존 테이블 플래그를 빼고 Phoenix에서 추가한 Coprocessor만 삭제처리한다.
-                        	htableDesc.remove(ALREADY_EXIST_TABLE);
-                        	removeCoprocessorsOfPhoenix(htableDesc);
-                        	
-                        	admin.modifyTable(tableName, htableDesc);
+                        	restoreTable(admin, htableDesc);
                         } else {
 		                        admin.disableTable(tableName);
 		                        admin.deleteTable(tableName);
@@ -2407,7 +2462,8 @@ public class ConnectionQueryServicesImpl extends DelegateQueryServices implement
                             openConnection();
                             hConnectionEstablished = true;
                             boolean isDoNotUpgradePropSet = UpgradeUtil.isNoUpgradeSet(props);
-                            try (HBaseAdmin admin = getAdmin()) {
+//                            try (HBaseAdmin admin = getAdmin()) {		// 2017-01-17 modified by mini666
+                            	try (HBaseAdmin admin = getPhoenixAdmin()) {
                                 boolean mappedSystemCatalogExists = admin
                                         .tableExists(SchemaUtil.getPhysicalTableName(SYSTEM_CATALOG_NAME_BYTES, true));
                                 if (SchemaUtil.isNamespaceMappingEnabled(PTableType.SYSTEM,
@@ -2468,6 +2524,7 @@ public class ConnectionQueryServicesImpl extends DelegateQueryServices implement
                             try {
                                 if (!success && hConnectionEstablished) {
                                     connection.close();
+                                    phoenixConnection.close();			// 2017-01-17 added by mini666
                                 }
                             } catch (IOException e) {
                                 SQLException ex = new SQLException(e);
@@ -3318,6 +3375,15 @@ public class ConnectionQueryServicesImpl extends DelegateQueryServices implement
         }
     }
 
+    // 2017-01-17 added by mini666
+    public HBaseAdmin getPhoenixAdmin() throws SQLException {
+    	try {
+    		return new HBaseAdmin(phoenixConnection);
+    	} catch (IOException e) {
+    		throw new PhoenixIOException(e);
+    	}
+    }
+    
     @Override
     public MetaDataMutationResult updateIndexState(final List<Mutation> tableMetaData, String parentTableName) throws SQLException {
         byte[][] rowKeyMetadata = new byte[3][];

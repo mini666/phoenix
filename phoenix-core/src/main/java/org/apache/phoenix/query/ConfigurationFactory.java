@@ -21,6 +21,7 @@ import java.util.concurrent.Callable;
 
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.hbase.HBaseConfiguration;
+import org.apache.phoenix.config.PhoenixConfiguration;
 import org.apache.phoenix.util.PhoenixContextExecutor;
 
 /**
@@ -37,6 +38,10 @@ public interface ConfigurationFactory {
 
     Configuration getConfiguration(Configuration conf);
 
+    // 2017-01-17 added by mini666
+    Configuration getPhoenixConfiguration();
+    Configuration getPhoenixConfiguration(Configuration conf);
+    
     /**
      * Default implementation uses {@link org.apache.hadoop.hbase.HBaseConfiguration#create()}.
      */
@@ -60,5 +65,28 @@ public interface ConfigurationFactory {
                 }
             });
         }
+
+        // 2017-01-17 added by mini666
+        //////////////////////////////////////////////////////////////
+				@Override
+				public Configuration getPhoenixConfiguration() {
+					return PhoenixContextExecutor.callWithoutPropagation(new Callable<Configuration>() {
+            @Override
+            public Configuration call() throws Exception {
+                return PhoenixConfiguration.create();
+            }
+					});
+				}
+
+				@Override
+				public Configuration getPhoenixConfiguration(final Configuration conf) {
+					return PhoenixContextExecutor.callWithoutPropagation(new Callable<Configuration>() {
+            @Override
+            public Configuration call() throws Exception {
+                return PhoenixConfiguration.create(conf);
+            }
+					});
+				}
+        //////////////////////////////////////////////////////////////
     }
 }

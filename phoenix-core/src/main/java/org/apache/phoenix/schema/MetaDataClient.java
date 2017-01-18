@@ -1876,8 +1876,11 @@ public class MetaDataClient {
                     .build().buildException();
                 }
                 if (SchemaUtil.hasHTableDescriptorProps(tableProps)) {
-                    throw new SQLExceptionInfo.Builder(SQLExceptionCode.VIEW_WITH_PROPERTIES).build()
-                            .buildException();
+                		// 2017-01-17 modified by mini666 - 기존 테이블에 뷰 생성후 제거시 추가된 Coprocessor를 제거하기 위해 필요함.
+                	  if (tableProps.get("ALREADY_EXIST") == null) {
+	                    throw new SQLExceptionInfo.Builder(SQLExceptionCode.VIEW_WITH_PROPERTIES).build()
+	                            .buildException();
+                	  }
                 }
             }
 

@@ -111,6 +111,19 @@ public class SecureUserConnectionsTest {
                 copy.addResource(confToClone);
                 return copy;
             }
+            // 2017-01-17 added by mini666
+            /////////////////////////////////////////////////////
+						@Override
+						public Configuration getPhoenixConfiguration() {
+							return conf;
+						}
+						@Override
+						public Configuration getPhoenixConfiguration(Configuration confToClone) {
+							Configuration copy = new Configuration(conf);
+              copy.addResource(confToClone);
+              return copy;
+						}
+            /////////////////////////////////////////////////////
         });
         updateDefaultRealm();
     }
